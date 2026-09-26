@@ -219,7 +219,26 @@
 <!-- 公式排版引擎(MathJax,离线内嵌;仅在详情卡手动触发排版) -->
 <script>
   window.MathJax = {
-    tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']] },
+    tex: {
+      inlineMath: [['$', '$']], displayMath: [['$$', '$$']],
+      // 关键:禁用 autoload。默认开启时,遇到未内置的宏(如 \boldsymbol)会去懒加载
+      // input/tex/extensions/xxx.js —— 本应用只内嵌了一个 mathjax-tex-svg.js,那个请求
+      // 必然 404,而 typesetPromise 会因此整体 reject(还被 .catch 吞掉),结果是整张卡片
+      // 的公式全部保持 $...$ 不排版(实测踩过:2026 真题里的 \boldsymbol{a})。
+      // 关掉之后,最坏只影响那一个未知宏,同页其余公式照常渲染。
+      autoload: false,
+      // 常见的"扩展宏"给等价替身,让它们不再变成未知宏(粗体向量用内置 \mathbf 等价呈现)。
+      macros: {
+        boldsymbol: ['\\mathbf{#1}', 1],
+        bm: ['\\mathbf{#1}', 1],
+        cancel: ['#1', 1],
+        bbox: ['#1', 1],
+        unicode: ['#1', 1],
+        textcolor: ['#2', 2],
+        enclose: ['#2', 2],
+        require: ['', 1]
+      }
+    },
     startup: { typeset: false }
   };
 </script>

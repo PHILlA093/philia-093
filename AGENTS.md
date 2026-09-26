@@ -253,6 +253,8 @@ Build ID **`QG-20260920-5e5d5a`**，位于：
 8. Android 工具链路径：JDK `E:\android\jdk17`、SDK `E:\android\sdk`、Gradle home `E:\android\gradle-home`；**这些环境变量在本会话里默认是空的**，每条打包命令都要自己设。
 9. **headless 浏览器探针**用项目自带的 `_qa/*.js`（原生 CDP，不需要 puppeteer）。它们会往 `%TEMP%` 写 profile 与截图；端口请错开（各探针内部端口是 9800+随机，外部端口由你传）。
 10. **别对正在被别的 agent 改的文件动手**；也别删别人的 `_backup_*` / `_cc_*` / 探针临时目录。
+11. **MathJax 的 `autoload` 必须显式关掉**（三个页面的 `window.MathJax.tex` 里都有 `autoload: false`）。默认开启时，正文里出现**任何未内置的宏**（`\boldsymbol`、`\cancel`、`\bbox`、`\unicode`、`\textcolor` …）都会让 MathJax **懒加载** `input/tex/extensions/<名字>.js`；而本应用只内嵌了单个 `vendor/mathjax-tex-svg.js`，那个请求必然 **404** → `typesetPromise` **整体 reject** → 而调用处的 `.catch(function(){})` 会把它**静默吞掉** → 结果是**整张卡片的公式全部保持 `$...$` 不排版**（实测事故：2026 真题里的 `\boldsymbol{a}`，日志留下 `404:web.vendor.input.tex.extensions.boldsymbol.js`）。
+    现在的兜底有三层：关 `autoload` + 给 8 个常见扩展宏做等价替身（`\boldsymbol`/`\bm` → `\mathbf` 等）+ 提示词禁用这些宏。**改动 MathJax 配置或渲染调用处后，必须跑断言：页面里渲染过的公式要出现 `mjx-container`、且文本里不再含 `$`**（`_qa/qa.js` 里有这条）。同类"静默失败"的排查思路：**先看 `%LOCALAPPDATA%\穷观学习\knet_run.log` 有没有 `404:` / `ERROR` 行，再看被 `.catch` 吞掉的 Promise**。
 
 ---
 
