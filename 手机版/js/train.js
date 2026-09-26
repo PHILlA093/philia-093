@@ -38,6 +38,201 @@
   }
   var busy = false;
 
+  /* ============================================================
+   * 年份意图(与桌面版同一口径)
+   * ------------------------------------------------------------
+   * 识别本身不在这里:唯一口径是 js/corpus.js 的 yearIntent()(纯函数,与桌面宿主
+   * 的年份识别同一套正则/意图词表),train.js 只消费它的结果,避免两边各写一套。
+   * 下面的纯函数负责"搜索框原话 → 年份档位 / 素材题数 / 状态栏文案",可离线断言。
+   * ============================================================ */
+
+  /* 年份档里"算意图词"的(与 corpus.js INTENT_WORDS 同一批 + 卷面类词) */
+  var YEAR_ASK_INTENT = ['高考', '真题', '试题', '考卷', '试卷', '模拟', '联考', '月考',
+    '质检', '一模', '二模', '押题', '原卷', '全卷解析', '解析'];
+  /* 年份档里"不算实词"的噪声:去掉它们之后还剩东西,才算 yearScope */
+  var YEAR_ASK_NOISE = ['全卷', '卷', '题', '年', '的'];
+
+  /* ---------- 搜索框原话 → 年份档位(纯函数,只看用户敲的那句话) ----------
+   * 与桌面版同一分级:
+   *   yearOnly : 只有年份(可带"年")与意图词,没有别的实词 ——
+   *              「2026」「2026年」「2026高考题」「2026年高考真题」都算。
+   *              → 检索式只含年份与意图词,**绝不拼当前知识点**;不按知识点过滤;
+   *                年份子池内按"试卷优先"排序;realN 提到 4。
+   *   yearScope: 年份 + 其它实词(「2026 函数单调性」)—— 实词来自用户原话。
+   *              → 年份先筛、实词在年内缩小;**仍不拼当前知识点**;realN 按用户选择。
+   *   none     : 没写年份 → 维持既有行为。
+   * 为什么必须分级:用户搜「2026」要的是**那一年的整卷真题**,不是
+   * "2026 年的函数与单调性题";把当前知识点拼进去就把年份需求带偏了。 */
+  var YEAR_ASK_RE = /(?:19|20)\d{2}/;
+  function yearAskMode(askKwText) {
+    var raw = String(askKwText == null ? '' : askKwText).replace(/^\s+|\s+$/g, '');
+    var m = YEAR_ASK_RE.exec(raw);
+    var year = null;
+    if (m) {
+      var y = parseInt(m[0], 10);
+      if (y >= 1900 && y <= 2099) year = y;
+    }
+    if (!year) return { mode: 'none', year: null, query: '', topic: '', word: '', rest: '', raw: raw };
+    // 去掉年份、意图词、噪声词、标点与纯数字,剩下的才算"实词"
+    var rest = raw, pass = '', guard = 0;
+    do {
+      pass = rest;
+      rest = rest.replace(/(?:19|20)\d{2}/g, ' ');
+      for (var i = 0; i < YEAR_ASK_INTENT.length; i++) rest = rest.split(YEAR_ASK_INTENT[i]).join(' ');
+      for (var j = 0; j < YEAR_ASK_NOISE.length; j++) rest = rest.split(YEAR_ASK_NOISE[j]).join(' ');
+      rest = rest.replace(/[\s0-9]+/g, ' ')
+        .replace(/[，,、;；.。·:：!！?？()（）\[\]【】{}<>《》"'~@#$%^&*_+=—\/\\|+-]+/g, ' ')
+        .replace(/^\s+|\s+$/g, '');
+      guard++;
+    } while (rest !== pass && rest.length > 0 && guard < 6);
+    var word = '';
+    for (var k = 0; k < YEAR_ASK_INTENT.length; k++) {
+      if (raw.indexOf(YEAR_ASK_INTENT[k]) >= 0) { word = YEAR_ASK_INTENT[k]; break; }
+    }
+    if (rest) {
+      // 年份限定:年份交给检索端当子池,检索式只用**实词**(用户原话里的年份已去掉),
+      // 这样"2026年函数单调性"连写不带空格也能在年内真正缩小,而不是拿整串去撞。
+      // 仍然不拼任何知识点。
+      return { mode: 'yearScope', year: year, query: rest, topic: year + ' 年 ' + rest,
+        word: word, rest: rest, raw: raw };
+    }
+    // 年份主导:检索式只含年份 + 原话里出现过的意图词
+    var segs = [String(year)];
+    for (var q = 0; q < YEAR_ASK_INTENT.length; q++) {
+      if (raw.indexOf(YEAR_ASK_INTENT[q]) >= 0) segs.push(YEAR_ASK_INTENT[q]);
+    }
+    return { mode: 'yearOnly', year: year, query: segs.join(' '), topic: year + ' 年高考真题',
+      word: word, rest: '', raw: raw };
+  }
+
+  /* ---------- 检索式构造(纯函数) ----------
+   * 年份档只认搜索框原话,绝不拼当前知识点 —— 用户搜「2026」要的是 2026 年的
+   * 整卷真题,不是"2026 年的函数与单调性题";把知识点拼进去就把年份需求带偏了。
+   *   askKwText : 搜索框原话
+   *   pointText : 知识点对应的检索词(名称+关键词+板块);无知识点时传 ''
+   * 返回 {mode, query, topic, year, word}。 */
+  function buildQuery(askKwText, pointText) {
+    var am = yearAskMode(askKwText);
+    if (am.mode !== 'none') {
+      return { mode: am.mode, query: am.query, topic: am.topic, year: am.year, word: am.word };
+    }
+    var pt = String(pointText == null ? '' : pointText).replace(/^\s+|\s+$/g, '');
+    var q = pt || String(askKwText == null ? '' : askKwText).replace(/^\s+|\s+$/g, '');
+    return { mode: 'none', query: q, topic: q, year: null, word: '' };
+  }
+
+  /* 年份意图 × 素材偏好 → 本批"优先采用的素材题数"
+   *   #qSource = 0 / 2 / 4,非法值回退 2(既有口径,不动);
+   *   年份主导(yearOnly)→ 提到 4(4 题尽量都用该年份整卷真题);
+   *   年份限定(yearScope)→ 按用户选择(年份只负责筛,不改素材题数);
+   *   用户显式选 0(AI 原创)一律以用户为准,不被年份顶掉。 */
+  function resolveRealN(requested, yi) {
+    var realN = [0, 2, 4].indexOf(requested) >= 0 ? requested : 2;
+    if (yi && yi.hit && yi.mode === 'yearOnly' && realN !== 0) {
+      return { realN: 4, byYear: true, raised: realN < 4 };
+    }
+    return { realN: realN, byYear: false, raised: false };
+  }
+
+  /* 年份意图 → 状态栏/步骤栏文案(纯函数)
+   *   yi   : 年份档信息 {year, mode, hit, ignoredPoint, available}
+   *   info : 检索端回报的年份信息 {year,pool,matched,fallback,archiveYear,range}
+   *          (没检索时为 null,例如用户选了 AI 原创 / 检索失败)
+   *   realN: 本批素材题数
+   *   taken: 本次真正拿到的片段段数
+   *   err  : 本机资料库检索失败的可读原因(有值时优先如实说"检索失败")
+   *   ui   : {names:[文件名...], total:N} —— 命中素材的来源(最多 3 条 + "等 N 段")
+   * 文案里出现的每个数字都来自检索端,不在这里编;每段都以"。"收尾。 */
+  function yearStatusText(yi, info, realN, taken, err, ui) {
+    if (!yi || !yi.year) return '';
+    var y = yi.year;
+    var head = '识别到你要 ' + y + ' 年真题:';
+    var raised = (realN === 4 && yi.mode === 'yearOnly') ? ';因指定年份,已把素材题数提到 4 题' : '';
+    var names = (ui && ui.names && ui.names.length) ? ui.names : null;
+    var total = (ui && ui.total) || 0;
+    var srcNote = names ? '(如 ' + names.join('、')
+      + (total > names.length ? ' 等 ' + total + ' 段' : '') + ')' : '';
+    // 年份主导才说"已按年份出题";被忽略的知识点必须说清楚(用户要知道知识点没参与)
+    var onlyNote = (yi.mode === 'yearOnly' && yi.available)
+      ? (yi.ignoredPoint ? ',已按年份检索,本次忽略当前知识点' : ',已按年份出题') : '';
+    var scopeNote = (yi.mode === 'yearScope' && yi.ignoredPoint && yi.available)
+      ? ',本次未拼入当前知识点' : '';
+    if (!realN) {
+      return head + '素材偏好=AI 原创,按你的选择未检索素材(本轮不会用 ' + y + ' 年真题,也不得凭记忆补写)。';
+    }
+    if (err) {
+      return head + '本机资料库检索失败(' + err + '),拿不到 ' + y + ' 年素材;'
+        + '本轮按无素材处理,不得凭记忆编造 ' + y + ' 年真题。';
+    }
+    if (info && info.pool > 0) {
+      if (info.matched > 0) {
+        var got = Math.min(realN, info.matched, taken > 0 ? taken : info.matched);
+        // 年份档只用"自身年份就是该年份"的真原卷(与桌面同一口径)。头部含该年份的
+        // 候选里可能大部分是 "…/2008-2026/2025年高考数学试卷.txt" 这种合集目录命中,
+        // 把候选/真原卷的段数一并报出来,用户能自己判断素材成色。
+        var named = (info.otherYears > 0)
+          ? '(头部含"' + y + '"的候选 ' + info.candidates + ' 段,其中自身就是 ' + y + ' 年原卷的 '
+            + info.strict + ' 段' + (info.papers ? '(' + info.papers + ' 份)' : '')
+            + ';已只用这 ' + info.strict + ' 段)'
+          : '';
+        return head + '本机档案 ' + y + ' 年命中 ' + info.matched + ' 段,已取 ' + got + ' 段作为素材'
+          + srcNote + named + onlyNote + scopeNote + raised + '。';
+      }
+      return head + '本机档案 ' + y + ' 年命中 0 段('
+        + (yi.mode === 'yearOnly' ? '该年份素材与检索式对不上' : '该年份素材与本次知识点/关键词对不上')
+        + '),已退回普通检索,下面取到的素材不是 ' + y + ' 年真题' + raised + '。';
+    }
+    // 该年份一段真原卷都没有:如实说清楚"档案里没有",并给出能查的年份区间
+    var rng = (info && info.range && info.range.from)
+      ? info.range.from + '-' + info.range.to : '档案年份未知';
+    var cand = (info && info.candidates) ? '头部含"' + y + '"的 ' + info.candidates
+      + ' 段都不是 ' + y + ' 年原卷(是"2008-' + y + '"这类合集目录命中),不当作 ' + y + ' 年真题。' : '';
+    var extra = (info && info.archiveYear) ? '本机档案里另有 ' + info.archiveYear
+      + ' 段提到 ' + y + ' 年的资料,但不是真题卷(讲义/复习资料),不当作 ' + y + ' 年真题。' : '';
+    return head + '本机档案里没有 ' + y + ' 年的题(档案年份 ' + rng + ')'
+      + '。请换年份,或去掉年份按知识点出题。' + cand
+      + extra + '已退回普通检索,下面取到的素材不是 ' + y + ' 年真题' + raised + '。';
+  }
+
+  /* ---------- 出题入口判定(纯函数) ----------
+   * 手机版原先"解析不到知识点就直接拦",用户在搜索框里打「2026高考题」会被挡在门外 ——
+   * 可本机档案里检索真题本来就不需要先选知识点。现在:
+   *   · 没有科目数据(hasDB=false) → 拦(文案沿用原有的"先选目标…",一字不改)
+   *   · 有知识点(target)          → 放行,原样(既有路径不动)
+   *   · 无知识点但有检索词        → 放行,目标 = {p:null, via:'ask', kw:检索词},
+   *                                检索式就是这批题的选题依据
+   *   · 无知识点也无检索词        → 拦,并告诉用户该怎么搜
+   * 返回 {ok, t, byAsk, msg}。 */
+  function gateRun(hasDB, target, askKwText) {
+    if (!hasDB) {
+      return { ok: false, t: null, byAsk: false,
+        msg: '先选目标:在主系统点选一个知识点,或在上面输入关键词并「定位」' };
+    }
+    if (target) return { ok: true, t: target, byAsk: false, msg: '' };
+    var kw = String(askKwText == null ? '' : askKwText).replace(/^\s+|\s+$/g, '');
+    if (!kw) {
+      return { ok: false, t: null, byAsk: false,
+        msg: '请输入要搜的题(例如:2026高考题),或在主界面点选知识点' };
+    }
+    return { ok: true, t: { p: null, via: 'ask', kw: kw, matched: 0 }, byAsk: true, msg: '' };
+  }
+
+  /* 素材来源文件名:从 ###SRC: 路径里取末段(整条目录在手机窄屏上会撑破卡片)。
+   * 去重保序,最多 max 条;返回 {names, more, total}(total = 本次片段段数)。 */
+  function srcNames(hits, max) {
+    var names = [];
+    var list = hits || [];
+    for (var i = 0; i < list.length; i++) {
+      var s = String((list[i] && list[i].src) || '');
+      var seg = s.split(/[\\/]/);
+      var nm = seg.length ? seg[seg.length - 1] : '';
+      if (!nm) nm = s || '(来源未知)';
+      if (names.indexOf(nm) < 0) names.push(nm);
+    }
+    var n = max > 0 ? max : 3;
+    return { names: names.slice(0, n), more: Math.max(0, names.length - n), total: list.length };
+  }
+
   // 阶段标记:写入页面标题便于宿主 TITLE 日志观察(诊断用),3 秒后自动复原
   var tagTimer = null;
   function tag(s) {
@@ -314,12 +509,58 @@
     return null;
   }
 
+  /* 搜索框原话:解析不到知识点时,它就是唯一的选题依据(也决定年份档位) */
+  function askKw() {
+    return ((els.askInput && els.askInput.value) || '').replace(/^\s+|\s+$/g, '');
+  }
+  /* 无知识点时的"检索式目标"(p:null);没有检索词就不成立 */
+  function askTarget() {
+    var kw = askKw();
+    return kw ? { p: null, via: 'ask', kw: kw, matched: 0 } : null;
+  }
+  /* 界面用目标:优先真实知识点,其次检索式 —— 与 runGen 的入口判定同一口径
+   * (手机版原来"没有知识点"时这一行是空的,用户看不出自己到底要出什么题) */
+  function uiTarget() {
+    return currentTarget() || askTarget();
+  }
+
+  /* 最近一次检索到的素材来源(显示在 #targetInfo 里)。
+   * 记 kw:换了检索词就自动不再显示上一批的来源,避免"文不对题"。 */
+  var lastSrc = null;
+  /* 本次出题的年份档与状态栏文案:放模块级,QA 钩子(lastYear)才看得到真实数字;
+   * 每次 runGen 开头重置。 */
+  var yearI = null;
+  var yearNote = '';
+
   function renderTarget(t) {
     var el = els.targetInfo;
+    if (!el) return;
+    var am = yearAskMode(askKw());
+    /* 年份档:目标行必须说明"知识点没参与"(否则用户以为还是按知识点出题),
+     * 并把命中素材的来源文件名摆出来 —— 手机窄屏只显示文件名、可换行。 */
+    if (am.mode !== 'none') {
+      var aw = askKw();
+      var line = '检索式:<b>' + esc(aw) + '</b> ｜ ';
+      if (am.mode === 'yearOnly') {
+        line += (t && t.p) ? '年份主导:已按年份检索,本次忽略当前知识点'
+          : '未指定知识点,按素材出题(年份主导:' + am.year + ' 年整卷真题)';
+      } else {
+        line += '年份限定:只在 ' + am.year + ' 年素材里检索'
+          + (t && t.p ? '(未拼入当前知识点)' : '');
+      }
+      el.innerHTML = line + srcLineHtml(aw);
+      return;
+    }
     if (!t) { el.innerHTML = ''; return; }
+    if (!t.p) {
+      // 未指定知识点、只给了检索词:检索式就是这批题的选题依据
+      el.innerHTML = '检索式:<b>' + esc(t.kw) + '</b> ｜ 未指定知识点,按素材出题'
+        + srcLineHtml(t.kw);
+      return;
+    }
     var p = t.p;
     var b = null;
-    (curDB.boards || []).forEach(function (x) { if (x.id === p.board) b = x; });
+    (curDB && curDB.boards || []).forEach(function (x) { if (x.id === p.board) b = x; });
     var html = '目标:<b>' + esc(p.name) + '</b>' +
       ' ｜ 板块:' + esc(b ? b.name : p.board) +
       ' ｜ 重要度 ★' + p.importance + '/5 · 相关度 ●' + p.core + '/5';
@@ -329,6 +570,15 @@
     var kws = p.keywords || [];
     if (kws.length) html += '<br>关键词:' + kws.map(function (k) { return '<span class="kw-tag">' + esc(k) + '</span>'; }).join('');
     el.innerHTML = html;
+  }
+
+  /* 命中素材来源那一行(最多 3 个文件名 + "等 N 段";长文件名在窄屏可断行) */
+  function srcLineHtml(kw) {
+    if (!lastSrc || lastSrc.kw !== kw || !lastSrc.names.length) return '';
+    return '<div style="word-break:break-all;overflow-wrap:anywhere;white-space:normal">素材来源:'
+      + esc(lastSrc.names.join('、'))
+      + (lastSrc.total > lastSrc.names.length ? ' 等 ' + lastSrc.total + ' 段' : '')
+      + '</div>';
   }
 
   /* ---------- 宿主通道(桌面版) ---------- */
@@ -567,8 +817,45 @@
   }
 
   /* ---------- 真实高考真题素材(本地 zt 源 + 必应联网) ---------- */
-  function gkMats(query) {
-    return matsReq({ kind: 'mats', src: 'zt', loose: true, query: query }).then(takeHits);
+  // 年份意图命中时把年份一并交给检索端(桌面宿主 / 内置语料同名字段):
+  //   检索端先按"头部含该年份"筛出该年份子池,再做原有匹配;该年份 0 段时退回普通检索。
+  // 年份放在独立字段而不是拼进 query —— 退回普通检索时,query 仍是原来那串,
+  // 不会因为query 里多了个"2026"把无关块顶上来。
+  // paperFirst(年份主导)= 年份子池内"试卷优先"排序:用户搜「2026」要的是那一年的
+  //   整卷真题,原卷/解析/各地卷排前面,而不是"2026 年某知识点的题"。
+  var gkYearInfo = null;      // 上一次真题检索回报的年份信息(状态栏只用这里的数字)
+
+  /* 年份回执归一化(纯函数):两条路形状不同,这里拉平,后面 realN/提示词/状态栏
+   * 就不用分环境 ——
+   *   手机版内置语料(js/corpus.js):{ year: { pool, strict, candidates, matched, ... } }
+   *   桌面宿主(Program.cs HandleMats):平铺字段
+   *     { year:2026, yearMode, yearOnly, filtered, strict, otherYears, matched,
+   *       papers, fallback, yearFrom, yearTo }
+   * 拿错形状的后果是把"有素材"误报成"档案里没有该年份",所以必须两种都认。 */
+  function yearInfoOf(r) {
+    if (!r || !r.year) return null;
+    if (typeof r.year === 'object') return r.year;            // 手机版内置语料
+    var m = r.matched || 0;
+    return {
+      year: r.year, pool: r.strict || 0, strict: r.strict || 0,
+      candidates: r.filtered || 0, otherYears: r.otherYears || 0,
+      papers: r.papers || 0, names: [], matched: m, fallback: !!r.fallback,
+      archiveYear: 0, range: { from: r.yearFrom || 0, to: r.yearTo || 0 },
+      from: 'host'
+    };
+  }
+
+  function gkMats(query, year, paperFirst) {
+    var payload = { kind: 'mats', src: 'zt', loose: true, query: query };
+    if (year > 0) payload.year = year;
+    if (paperFirst) {
+      payload.paperFirst = true;
+      payload.yearOnly = true;   // 桌面宿主 Program.cs 认这个字段(同一档位,名字对齐)
+    }
+    return matsReq(payload).then(function (r) {
+      gkYearInfo = yearInfoOf(r);
+      return takeHits(r);
+    });
   }
   function webMats(query, terms) {
     // 必应联网检索由桌面宿主发起;手机版(无宿主)没有这条路。
@@ -590,11 +877,16 @@
   /* ---------- AI Prompt 组装 ----------
    * diff: 难度档位 1~5(本组所有题难度一致);
    * realN: 优先采用的素材题数,与难度独立;不足时如实标记。
-   * gkHits: 本地真题片段;webHits: 必应联网检索片段。 */
-  function buildPrompt(t, gkHits, webHits, subjHits, diff, realN, totalN, typeCfg) {
+   * gkHits: 本地真题片段;webHits: 必应联网检索片段。
+   * yi: 年份档信息(corpus.js yearIntent / yearAskMode 的结果 + 检索回报的数字),
+   *     命中时把"用户点名要 <年份> 年高考真题"写进提示词。
+   * t.p 为空(只给了检索词)时不再要求"围绕知识点命制",改为"以检索到的素材为准"。 */
+  function buildPrompt(t, gkHits, webHits, subjHits, diff, realN, totalN, typeCfg, yi) {
     var p = t.p;
+    var noPoint = !p;                     // 未指定知识点:本批以检索到的素材为准
+    var yearOnly = !!(yi && yi.hit && yi.mode === 'yearOnly');
     typeCfg = typeCfg || { label: '单选题', jsonType: '单选' };
-    var kwLine = ((p.keywords || []).length ? '关键词:' + p.keywords.join('、') + '。' : '');
+    var kwLine = (!noPoint && (p.keywords || []).length ? '关键词:' + p.keywords.join('、') + '。' : '');
     var hasGk = !!(gkHits && gkHits.length);
     var hasWeb = !!(webHits && webHits.length);
     var typeRule = '';
@@ -642,22 +934,46 @@
         + '任一题复核不过,立即修正或替换为同难度更稳妥的题;最终输出不允许携带任何错误。'
     ].join('\n');
 
-    var ctx = [
-      '科目:' + (live.subjectName || curDB.subjectName),
-      '知识点:' + p.name,
-      '板块:' + (function () {
-        var n = p.board;
-        (curDB.boards || []).forEach(function (b) { if (b.id === p.board) n = b.name; });
-        return n;
-      })(),
-      '重要度(1~5):' + p.importance,
-      kwLine,
-      '知识点要点(节选):',
-      // 「待人工校对」的正文不得作为命题依据:它本身就标明内容未核实,
-      // 拿它出题等于把不确定内容包装成"教材结论"。此时改为要求模型按知识点名称自核教材。
-      /待人工校对/.test(p.content || '') ? '本条正文待人工校对,不作为命题依据。请根据知识点名称核对标准教材后命题。'
-        : String(p.content || '').replace(/\$\$/g, '$').slice(0, 1600)
-    ].join('\n');
+    var subjName = live.subjectName || (curDB ? curDB.subjectName : '') || '';
+    var ctxLines;
+    if (yearOnly) {
+      /* 年份主导:用户要的是那一年的**整卷真题**,不是某知识点专项题。
+       * 所以这里既不写当前知识点,也不要求"围绕知识点命制" —— 被忽略的知识点
+       * 要明说,免得模型自己把它捡回来。 */
+      ctxLines = [
+        '科目:' + subjName,
+        '主题:' + (yi.topic || (yi.year + ' 年高考真题')),
+        '检索式:' + (yi.query || ''),
+        '说明:用户要的是 ' + yi.year + ' 年整卷高考真题,不是某知识点的专项题;'
+          + '本次检索只按年份取卷、未按知识点过滤'
+          + (yi.ignoredPoint ? ',当前选中的知识点不参与本次出题' : '') + '。'
+      ];
+    } else if (noPoint) {
+      // 无知识点:检索式就是选题依据。素材为空时只出 AI 原创,如实标注。
+      ctxLines = [
+        '科目:' + subjName,
+        '检索式' + (yi && yi.hit ? '(年份限定 ' + yi.year + ' 年)' : '') + ':' + (t.kw || ''),
+        '用户没有指定具体知识点,本批以检索到的素材为准;素材为空时如实说明,只出 AI 原创并标注 AI 生成。'
+      ];
+    } else {
+      ctxLines = [
+        '科目:' + subjName,
+        '知识点:' + p.name,
+        '板块:' + (function () {
+          var n = p.board;
+          (curDB && curDB.boards || []).forEach(function (b) { if (b.id === p.board) n = b.name; });
+          return n;
+        })(),
+        '重要度(1~5):' + p.importance,
+        kwLine,
+        '知识点要点(节选):',
+        // 「待人工校对」的正文不得作为命题依据:它本身就标明内容未核实,
+        // 拿它出题等于把不确定内容包装成"教材结论"。此时改为要求模型按知识点名称自核教材。
+        /待人工校对/.test(p.content || '') ? '本条正文待人工校对,不作为命题依据。请根据知识点名称核对标准教材后命题。'
+          : String(p.content || '').replace(/\$\$/g, '$').slice(0, 1600)
+      ];
+    }
+    var ctx = ctxLines.join('\n');
 
     if (hasGk) {
       ctx += '\n\n【本地高考真题档案片段】(真实原题来源,优先于此片段选用;可清理版式噪声,'
@@ -668,6 +984,30 @@
         // 同一段原文回头逐字核对题干与选项 —— 没有 sourceId 就无法验证,只能一律"待核实"。
         ctx += '— sourceId=local-' + (i + 1) + ' [' + (h.src || '') + '] —\n' + String(h.text || '').slice(0, 1000) + '\n';
       }
+    }
+    /* ---------- 年份意图锚定 ----------
+     * 用户点名要 2026 年真题时,必须让模型知道这件事,同时把"本机到底有没有该年份"
+     * 一起告诉它 —— 只说要什么、不说有没有,模型就会用记忆里的"2026 年真题"补上,
+     * 那正是本能力要防的事。检索端回报的数字(info)才作数,这里不自己编。 */
+    if (yi && yi.hit) {
+      var yl = yearOnly
+        ? ('【年份主导】用户要的是 ' + yi.year + ' 年**整卷**高考真题,不是某知识点的专项题'
+           + '(年份由搜索框原话识别,当前知识点不参与)。')
+        : ('【年份指定】用户点名要 ' + yi.year + ' 年高考真题(年份意图已识别)。');
+      if (yi.available) {
+        yl += '本次本地片段已限定为来源路径含 ' + yi.year + ' 的档案(' + yi.matched + ' 段命中):'
+          + '只能用这些片段里的原题,且必须与片段原文一致'
+          + (yearOnly ? ',按整卷取题(题干/选项/顺序原样),不要把它改写成"知识点专项题"' : '') + ';'
+          + '路径里出现 ' + yi.year + ' 不等于该段就一定是 ' + yi.year + ' 年原卷(可能是"2008-2026"这类年份区间目录),'
+          + '要按片段正文里的试卷名称/年份判断;正文看不出 ' + yi.year + ' 年,就不要声称题目是 ' + yi.year + ' 年的,'
+          + '更不得改用记忆里的 ' + yi.year + ' 年真题。';
+      } else {
+        yl += '但本次检索没有拿到 ' + yi.year + ' 年的真题素材'
+          + (yi.reason ? '(' + yi.reason + ')' : '')
+          + ':一律不得把任何题目标成 ' + yi.year + ' 年真题,不得凭记忆写出 ' + yi.year + ' 年真题或试卷名称;'
+          + '素材不足时用 AI 原创补齐(source="AI 生成"),并在解析里如实说明本机档案没有 ' + yi.year + ' 年真题。';
+      }
+      ctx += '\n\n' + yl + '\n';
     }
     // 本机知识点档案:只能用于把握命题角度与易错点,绝不能当真题用
     if (subjHits && subjHits.length) {
@@ -851,12 +1191,16 @@
   function runGen() {
     if (busy) return;
     tag('start');
-    var t = currentTarget();
-    if (!t) {
-      setStatus('先选目标:在主系统点选一个知识点,或在上面输入关键词并「定位」', 'warn');
+    // 入口判定:没有知识点但有检索词也放行(见 gateRun)——"2026高考题"这种
+    // 检索式本来就不需要先选知识点,本机档案里有的是真题。
+    var gate = gateRun(!!curDB, currentTarget(), askKw());
+    if (!gate.ok) {
+      setStatus(gate.msg, 'warn');
       tag(null);
       return;
     }
+    var t = gate.t;
+    var byAsk = gate.byAsk;              // true = 只给了检索词,没有知识点
     var key = keyState();
     if (!key) {
       setStatus('缺少 DeepSeek API Key:请在顶部填写并保存后重试', 'warn');
@@ -888,7 +1232,9 @@
     // 要几道"素材题"由 #qSource 单独选(0 / 2 / 4),非法值回退 2。
     // 原先把真题占比写成 (diff-1)*25%,用户想"难度一 + 多来点真题"根本无法表达。
     var requested = els.qSource ? parseInt(els.qSource.value, 10) : 2;
-    var realN = [0, 2, 4].indexOf(requested) >= 0 ? requested : 2;
+    // 先按用户选择算 realN(非法值回退 2);年份意图命中后会被提到 4
+    // (口径见 resolveRealN),用户显式选 0 则以用户为准。
+    var realN = resolveRealN(requested, null).realN;
     var t0 = Date.now();
 
     // 本地真题库(桌面版宿主读电脑上的 数据库\qg_corpus.txt;手机版读包内同一份语料)
@@ -898,13 +1244,55 @@
     // 来源会如实落在"来源待核实"上,绝不冒充真题。
     var gkLib = true;                          // 六科语料都在本机库里,一律先查本地
 
-    var query = t.p.name + ' ' + ((t.p.keywords || []).join(' ')) + ' ' + t.p.board;
-    var webQuery = (curDB ? curDB.subjectName : live.subjectName || '') + ' 高考真题 ' + t.p.name
-      + ' ' + ((t.p.keywords || []).join(' '));
-    var terms = (t.p.name + ' ' + (t.p.keywords || []).join(' ')).split(/[\s,，、;；]+/).filter(function (s) { return s.length >= 2; });
+    // 检索式三档(搜索框原话决定,见 buildQuery):
+    //   yearOnly / yearScope → 只用原话(年份[+实词]),**绝不拼当前知识点**
+    //   none                 → 既有口径:有知识点按知识点拼,没有就用原话
+    var pointText = t.p ? (t.p.name + ' ' + ((t.p.keywords || []).join(' ')) + ' ' + t.p.board) : '';
+    var bq = buildQuery(askKw(), pointText);
+    var query = bq.query;
+    var webQuery = bq.mode !== 'none'
+      ? ((curDB ? curDB.subjectName : live.subjectName || '') + ' ' + bq.topic)
+      : (t.p ? ((curDB ? curDB.subjectName : live.subjectName || '') + ' 高考真题 ' + t.p.name
+               + ' ' + ((t.p.keywords || []).join(' ')))
+             : ((curDB ? curDB.subjectName : live.subjectName || '') + ' ' + bq.query));
+    var terms = (t.p && bq.mode === 'none' ? (t.p.name + ' ' + (t.p.keywords || []).join(' ')) : bq.query)
+      .split(/[\s,，、;；]+/).filter(function (s) { return s.length >= 2; });
 
-    setStatus('正在为「' + (live.subjectName || curDB.subjectName) + ' · ' + t.p.name
-      + '」出题,上一批题目暂时保留。', '');
+    /* ---------- 年份意图:识别结果必须一路带到三处 ----------
+     *   ① 检索(限定该年份 + 年份主导时"试卷优先",见 gkMats 的 payload)
+     *   ② realN(年份主导提到 4 题)  ③ 状态栏 + 提示词锚定(不得凭记忆补年份)。
+     * 年份档的判定完全来自搜索框原话(buildQuery → yearAskMode,纯函数),不掺知识点;
+     * 非年份档才回落去看"检索式里有没有年份+意图词"(口径唯一来源仍是
+     * corpus.js 的 yearIntent 纯函数)。 */
+    yearI = null;              // 年份档信息(+ 检索回报的真实数字);模块级,QA 可读
+    yearNote = '';             // 状态栏那一段话(由 yearStatusText 生成)
+    gkYearInfo = null;         // 上一次检索回执:本轮重新取,不沿用上一批
+    if (bq.mode !== 'none') {
+      yearI = {
+        year: bq.year, intent: '真题', word: bq.word, hit: true, mode: bq.mode,
+        query: bq.query, topic: bq.topic, ignoredPoint: !!t.p, raw: askKw()
+      };
+    }
+
+    function resolveYearIntent() {
+      if (yearI) return Promise.resolve(yearI);          // 年份档已成形,无需再判
+      var text = askKw() + ' ' + query;
+      if (window.QGCorpus && window.QGCorpus.yearIntent) {
+        return Promise.resolve(window.QGCorpus.yearIntent(text));
+      }
+      // 桌面宿主:年份由宿主 Program.cs 自己识别,手机版这边不重复判定(两边各管一段)
+      if (hasHost) return Promise.resolve(null);
+      // 手机版:corpus.js 本来首次检索就要注入,这里只是把它提前(它**不会**触发
+      // 45MB 语料读取 —— 读语料是 mats()→load() 的事)。注入失败就当没有年份意图,
+      // 退回本能力加入前的行为(不会误报年份,也不会因此出不了题)。
+      return loadCorpusLib().then(function (C) {
+        return C.yearIntent ? C.yearIntent(text) : null;
+      }, function () { return null; });
+    }
+
+    setStatus(t.p
+      ? ('正在为「' + (live.subjectName || curDB.subjectName) + ' · ' + t.p.name + '」出题,上一批题目暂时保留。')
+      : ('正在按检索式「' + (t.kw || askKw()) + '」出题(未指定知识点,以检索到的素材为准),上一批题目暂时保留。'), '');
 
     var bestGk = [], bestWeb = [], bestSubj = [], attempts = 0, feedback = '';
 
@@ -913,7 +1301,7 @@
       // available = 本次素材里"值得优先采用的完整题目"上限。素材不足时如实降低要求,
       // 让模型知道不必硬凑 —— 硬凑的下场就是伪造真题。
       var available = Math.min(realN, bestGk.length + bestWeb.length);
-      var pr = buildPrompt(t, bestGk, bestWeb, bestSubj, diff, available, totalN, typeCfg);
+      var pr = buildPrompt(t, bestGk, bestWeb, bestSubj, diff, available, totalN, typeCfg, yearI);
       var messages = [{ role: 'system', content: pr.system }, { role: 'user', content: pr.user
         + '\n请输出恰好4道' + typeCfg.label + ',难度均为' + diff + '。'
         + (feedback ? '\n上次格式未通过检查,请修正:' + feedback : '') }];
@@ -944,25 +1332,66 @@
     }
 
     return Promise.resolve().then(function () {
+      setSteps('<span class="spinner"></span>① 识别查询里的年份意图…');
+      return resolveYearIntent();
+    }).then(function (yi) {
+      if (yi && yi.hit) {
+        yearI = yi;
+        var rr = resolveRealN(requested, yi);
+        realN = rr.realN;                    // 年份主导 → 4 题(用户选 0 时不动)
+        setStatus(yi.mode === 'yearOnly'
+          ? ('识别到你要 ' + yi.year + ' 年的题:正在本机档案里取 ' + yi.year + ' 年整卷真题'
+             + (yi.ignoredPoint ? '(已按年份检索,本次忽略当前知识点)' : '') + '…')
+          : ('识别到你要 ' + yi.year + ' 年真题:正在本机档案里检索 ' + yi.year + ' 年素材…'), '');
+      }
       setSteps('<span class="spinner"></span>① 本机资料库检索中…');
-      return subjMats(t.p.name);
+      // 年份主导:用户要的是那一年的整卷真题,不按知识点过滤 —— 连"本机知识点档案"
+      // (subj,按知识点名检索)也不参与,否则等于又把知识点塞回了检索里。
+      return (yearI && yearI.mode === 'yearOnly') ? [] : subjMats(t.p ? t.p.name : (t.kw || askKw()));
     }).then(function (hits) {
       bestSubj = hits || [];
-      return realN && gkLib ? gkMats(query) : [];
+      return realN && gkLib
+        ? gkMats(query, yearI ? yearI.year : 0, !!(yearI && yearI.mode === 'yearOnly')) : [];
     }).then(function (hits) {
       bestGk = hits || [];
       var has = bestGk.length;
       var libName = hasHost ? '本地真题库' : '内置语料';
+      var sn = srcNames(bestGk, 3);
+      // 年份意图:状态栏/提示词里的年份数字只认检索端回报的 info(gkYearInfo),
+      // 检索端说"该年份 0 段"就照实说 0 段,绝不拿"查到了几段"糊过去。
+      if (yearI) {
+        yearI.pool = gkYearInfo ? (gkYearInfo.pool || 0) : 0;
+        yearI.matched = gkYearInfo ? (gkYearInfo.matched || 0) : 0;
+        yearI.fallback = !!(gkYearInfo && gkYearInfo.fallback);
+        yearI.archiveYear = gkYearInfo ? (gkYearInfo.archiveYear || 0) : 0;
+        yearI.range = gkYearInfo ? gkYearInfo.range : null;
+        yearI.available = !!(gkYearInfo && gkYearInfo.pool > 0 && gkYearInfo.matched > 0);
+        // reason:年份素材为什么没拿到(提示词里如实写给模型看)。检索端回报为准:
+        //   子池 0 段 → 档案里没有该年份;子池有但 0 命中 → 该年份素材与检索式对不上;
+        //   整个检索失败(matsErr)→ 直接用失败原因。
+        yearI.reason = gkYearInfo
+          ? (yearI.fallback ? '本机档案里没有 ' + yearI.year + ' 年的题'
+            : (!yearI.matched ? (yearI.mode === 'yearOnly' ? '该年份素材与检索式对不上'
+                                                           : '该年份素材与本次知识点/关键词对不上') : ''))
+          : (matsErr || '');
+        yearNote = yearStatusText(yearI, gkYearInfo, realN, bestGk.length, matsErr, sn);
+      }
+      // 未指定知识点(或年份档忽略了知识点):把"这批题到底从档案里调出了哪些文件"
+      // 显示在目标行下面,用户能看见题目确实来自档案(窄屏只显示文件名,可换行)。
+      if (byAsk || (yearI && yearI.ignoredPoint)) {
+        lastSrc = { kw: t.kw || askKw(), names: sn.names, total: sn.total };
+        renderTarget(t);
+      }
       // 素材检索失败(语料读不到 / 格式不符 / 宿主超时)必须让用户看见:
       // 以前这里静默返回 [],界面只会说"无命中",用户根本不知道是文件出了问题。
       if (matsErr) {
         setStatus('⚠ ' + matsErr, 'warn');
         setSteps('⚠ 本机资料库不可用:' + esc(matsErr) + ' —— 本组不会有本地原文匹配的来源');
       } else {
-        setSteps(realN === 0
+        setSteps((yearNote ? esc(yearNote) + ' | ' : '') + (realN === 0
           ? '素材偏好=AI 原创,不检索素材,AI 出题中…'
           : (has ? '① ' + libName + '命中 ' + has + ' 段 ✓ | AI 出题中…'
-                 : '① ' + libName + '无命中,AI 出题中…'));
+                 : '① ' + libName + '无命中,AI 出题中…')));
       }
       tag(realN ? 'gk' : 'ds');
       // 本地已够目标题数就不再去联网(手机版本来也没有这条路,这里等价于直接跳过)。
@@ -982,12 +1411,18 @@
       var unverified = qs.filter(function (q) { return q.source !== 'AI 生成' && q._sourceKind === 'unverified'; }).length;
       var shortfall = realN > localN + webN;
       renderQuestions(qs, !gkLib);
+      // 年份意图那段话必须在**收尾**的状态栏里也出现:用户看的是这一条
+      // (检索期间的 setSteps 早就被"AI 出题中…"顶掉了)。文案里的数字全部来自
+      // 检索端回报,不在这里编 —— 该年份 0 段时照实说 0 段。
+      var yearWarn = !!(yearNote && yearI && !yearI.available);
       setStatus('完成 — ' + Math.round((Date.now() - t0) / 1000) + ' 秒,共4题;本地原文匹配 '
         + localN + ' 道,联网原文匹配 ' + webN + ' 道'
         + (unverified ? ',来源待核实 ' + unverified + ' 道' : '')
-        + (shortfall ? '。素材匹配未达目标,其余题不作为已核实真题。' : '。答案与解析仍需核对。')
+        // yearNote 自带句末标点;没有年份意图时补回原来的那个"。"(原有文案一字不改)
+        + (yearNote ? ' ' + yearNote : '。')
+        + (shortfall ? '素材匹配未达目标,其余题不作为已核实真题。' : '答案与解析仍需核对。')
         + (matsErr ? '(⚠ ' + matsErr + ')' : ''),
-        (shortfall || unverified || matsErr) ? 'warn' : '');
+        (shortfall || unverified || matsErr || yearWarn) ? 'warn' : '');
       setSteps('题目格式检查通过 ✓');
       tag(null);
     }).catch(function (err) {
@@ -1068,9 +1503,9 @@
   setInterval(pollLive, 700);
   pollLive();
   setInterval(function () {
-    // 目标提示跟随(无提问词时显示主系统选中点)
-    var t = currentTarget();
-    renderTarget(t);
+    // 目标提示跟随:有知识点显示知识点;没有知识点但搜索框有词(或写了年份)
+    // 就显示检索式/年份档,让用户随时看得到这批题会按什么出。
+    renderTarget(uiTarget());
   }, 800);
 
   // 调试钩子
@@ -1089,7 +1524,33 @@
         function (e) { return { ok: false, err: (e && e.message) || '语料模块不可用' }; });
     },
     corpusErr: function () { return matsErr; },
-    corpusState: function () { return window.QGCorpus ? window.QGCorpus.state() : null; }
+    corpusState: function () { return window.QGCorpus ? window.QGCorpus.state() : null; },
+    // 年份意图直通钩子(自动化验收用):识别口径来自 corpus.js,输出与页面同源
+    yearIntent: function (q) {
+      return loadCorpusLib().then(function (C) {
+        return C.yearIntent ? C.yearIntent(q) : null;
+      }, function () { return null; });
+    },
+    yearStatus: function (yi, info, realN, taken, err) {
+      return yearStatusText(yi, info, realN, taken, err);
+    },
+    resolveRealN: function (requested, yi) { return resolveRealN(requested, yi); },
+    // 搜索框原话 → 年份档位 / 入口判定 / 来源文件名(自动化验收用,与页面同一套纯函数)
+    yearAskMode: function (kw) { return yearAskMode(kw); },
+    gateRun: function (hasDB, target, kw) { return gateRun(!!hasDB, target, kw); },
+    srcNames: function (hits, max) { return srcNames(hits, max); },
+    askTarget: askTarget,
+    uiTarget: uiTarget,
+    lastSrc: function () { return lastSrc; },
+    targetHtml: function () { return els.targetInfo ? els.targetInfo.innerHTML : null; },
+    lastYear: function () {
+      if (!yearI) return null;
+      return {
+        year: yearI.year, hit: yearI.hit, pool: yearI.pool, matched: yearI.matched,
+        available: yearI.available, fallback: yearI.fallback, archiveYear: yearI.archiveYear,
+        range: yearI.range, reason: yearI.reason, note: yearNote
+      };
+    }
   };
 
   // 自动化测试通道(?auto=1&ask=… / wipe=1,由桌面版 --qa= 或训练按钮带参打开时使用;
@@ -1104,9 +1565,12 @@
     if (m.auto !== '1') return;
     if (m.ask) els.askInput.value = m.ask;
     setTimeout(function () {
-      var t = currentTarget();
-      if (t) { setStatus('自动测试模式:目标「' + t.p.name + '」,开始出题…', ''); runGen(); }
-      else setStatus('自动测试:未解析到目标', 'err');
+      // 与手动点「出题训练」同一入口判定:只给了检索词(例如 2026高考题)也算目标
+      var g = gateRun(!!curDB, currentTarget(), askKw());
+      if (g.ok) {
+        setStatus('自动测试模式:目标「' + (g.t.p ? g.t.p.name : g.t.kw) + '」,开始出题…', '');
+        runGen();
+      } else setStatus('自动测试:' + g.msg, 'err');
     }, 1600);
   })();
 })();
