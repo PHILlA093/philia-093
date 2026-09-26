@@ -221,6 +221,11 @@ Build ID **`QG-20260920-5e5d5a`**，位于：
   → 手机 APK           node 穷观手机版_apk\_scripts\sync-www.js
                        npx --no-install cap sync android
                        android\gradlew.bat assembleDebug --no-daemon      （versionCode 必须递增！）
+                       ⚠ `sync-www.js` 的排除规则必须同时作用于**目录**：它原来只对文件用
+                       `isTempFile()`（下划线/点开头、`.bak-*`），目录只认硬编码的 `EXCLUDE_DIRS`，
+                       于是 `_backup_mathjax_autoload_<时间戳>\` 这种工作目录被**整目录**同步进
+                       `www/`（文件数 32→36），差点把修前的旧文件打进 APK 盖住新版。已修：
+                       目录也过 `isTempFile()`。**跑完务必核对输出是不是"32 个文件"**。
   → 验证 APK           aapt2 dump badging(versionCode/label) + assets 与源码逐字节 + 语料/指纹 + Key 扫描
   → 推仓库             main（桌面侧源码/exe/zip/tests）与 mobile-apk（手机版源码/APK）分开提交
   → 桌面               桌面版 zip 与 安卓 APK 换新（旧的**归档不删**到 穷观_归档\旧备份与旧版本\）
@@ -260,20 +265,26 @@ Build ID **`QG-20260920-5e5d5a`**，位于：
 
 ---
 
-## 10. 当前状态与已知未解（截至 2026-09-27 凌晨）
+## 10. 当前状态与已知未解（截至 2026-09-27 凌晨 03:40）
 
-**已发布**：`main` 含桌面版修复（宿主 8 处 + 前端 5 处 + 安装程序 7 处）、`tests/` 全套与两个过期探针修正、破卷"输出长度预算 + 截断可执行化 + 宿主 `finish=` 日志"；`mobile-apk` 含手机版同步（含新补进仓库的 `js/corpus.js`、`index.html`、`css/style.css`）与 APK **v1.2（versionCode 3）**。
+**已发布（GitHub）**：
+- `main` = 修到 **9a8b024**：桌面版宿主 8 处 + 前端 5 处 + 安装程序 7 处修复；`tests/` 全套；**年份检索三档 + 未选知识点也能搜题 + 素材按"自身年份"严格筛选**；破卷"输出长度预算 + 截断可执行化 + 宿主 `finish=` 日志"；**公式不排版修复（MathJax 关 `autoload` + 扩展宏替身 + 提示词禁用）**；`_qa/qa.js` 的"公式必须被排版"永久闸门；本手册。
+- `mobile-apk` = **6b6d0ac**：与桌面同源的**公式修复** + APK **v1.4 / versionCode 5**（`72E7CB6A…`，19,825,543 B，Android Debug 签名，`apksigner verify` 通过）。验证含"针对**包内字节**的渲染断言 12/12"与"A/B 负对照 4/12"（证明探针有灵敏度、不是假绿）。
+- 桌面三件产物：`穷观学习.exe` `BB639A6A…`（7,275,008 B）、安装程序 `EFBA5A76…`（13,559,296 B）、下载 zip `575440E7…`（12,842,098 B）；桌面快捷方式指向的正是这个 exe，桌面上那份 zip 也已同步为同一份。
 
-**年份检索三档 + 无知识点也能搜题（两侧均已实现并自测，正在重编发布）**：
+**年份检索三档（两侧均已实现并实测）**：
 - 桌面侧：`js/train.js`（`parseSearchIntent`/`pickRealN`/`yearTopic`/`yearIntentNote`/`gateRun`/素材来源卡片）+ 宿主 `Program.cs`（`QueryYearOnly`/`HasExamIntent`/`ArchiveYearRange`、**只取自身年份==目标年份的真原卷**、试卷优先排序、`MATS:` 日志新字段）。实测：`2026` → 候选 3665 段中**真原卷 536 段 / 18 份试卷**；`2050` → 0 段并如实报"档案年份 1952-2026"；`第01讲`/`4题` 不误判年份；`node --test` **34/34**。
 - 手机侧：`js/corpus.js`（`parseYearIntent`/`yearSets`/`paperRank`/`expandCjkTerms`/`archiveYearRange`/`mats()` 补 `year`）+ `js/train.js`（`yearAskMode`/`buildQuery`/`resolveRealN`/`yearStatusText`/`gateRun`/`srcNames`）。离线断言 **177/177**、页面探针 **6/6**、破卷页真机探针 **30/30**（页面内真读 50 MB 语料）；并顺手修了 3 个真 bug：`mats()` 没透传年份回执会把"有素材"说成"没年份"、年份区间对象把 37k 块池引用塞进回执、`2026 函数单调性` 因年份词满足宽松门槛导致**完全不缩小**。
-- APK 版本升到 **versionCode 4 / versionName 1.3**；桌面版对外版本号仍是 **V2.4.2**（未改，改它要动标题/说明/安装程序/zip 命名，需先问用户）。
-**要看到这些行为，必须重编 exe 与 APK 并重启应用。**
+- 桌面版对外版本号仍是 **V2.4.2**（未改；改它要同步标题/说明/安装程序/zip 命名，需先问用户）。
+
+**验证体系当前基线**：`qa.js` **46/46**、`tpl_probe` 45/45、`eng_probe` 20/20、`desk_fp_probe` 3/3、`mobile_fp_probe` 6/6；`node --test tests\regression.cjs tests\guanlan-window.cjs` **34/34**。公式修复另有 A/B 实证：构造"修前树"复现出 `404 / typesetPromise rejected / mjx-container=0 / 文本仍是 $...$`，修后同段内容 `404=0 / resolved / mjx-container=5 / 文本 a+x`，并证明新闸门在 bug 状态下**必然变红**。
 
 **已知未解/打折**：
-- 非数学科目不查本机 zt 档案（`gkLib` 门控），状态栏如实说明；
-- 年份主导档一次最多 10 段（"整卷"其实更适合"少而长"的片段，需要给宿主传 `realN`）；
-- 手机版 `paperFirst` 是自造 payload 字段（同时发 `yearOnly`），若桌面未来改字段名需再对齐；
+- **替身宏是语义降级**：`\cancel` → 内容保留但**没有删除线**、`\boldsymbol`/`\bm` → 粗体（非粗斜体）、`\textcolor`/`\enclose` → 丢颜色/框；**`\bbox[5px]{z}` 的 `[5px]` 会以字面量漏出**（`['#1',1]` 只吃一个参数）。只影响这两个罕见宏，但若模型真用了会有瑕疵。
+- **年份主导模式下模型可能不照抄原题**：实测用户搜「2026」时，素材（真原卷 536 段 / 18 份卷）确实被检出并送进了提示词，但模型自己写了 2026 风格的新题，于是四题都标「来源待核实」。按现行规则这**不算错**（只在"采用素材"的题上要求逐字一致），但不符合"搜 2026 就给我 2026 的题"。**候选改法（未做，需先问用户）**：在年份主导档的提示词里明确"必须优先原样采用素材原题，不得以'自己出得更规范'为由改写"。
+- 非数学科目**不查**本机 zt 档案（`gkLib = subject === 'math'` 门控），状态栏如实说明"真题档案检索当前只对数学启用"；
+- 年份主导档一次最多取 10 段（"整卷"其实更适合"少而长"的片段，需要给宿主传 `realN`）；
+- 手机版 `paperFirst` 是自造 payload 字段（同时发 `yearOnly`），若桌面未来改字段名需再对齐；手机版 heavyShim 写回尺寸时**没有**桌面的 `|| 1` 兜底；
 - `hit.src` 可能带尾部 `\r`（既有）；新"素材来源"显示处已清，宿主字段未动；
 - 英语库在真实数据下**不会**触发"词点层默认收起"（没有板块 >40%，也没有 `layer:true`）；
 - `index.html` 的 CSP 仍含 `'unsafe-inline'`（为不破坏既有 QA 未收紧）；
