@@ -193,7 +193,7 @@ Build ID **`QG-20260920-5e5d5a`**，位于：
 
 | 探针 | 覆盖 | 当前基线 |
 |---|---|---|
-| `qa.js` | 主回归（加载/检索/自定义点/出题失败处理/无异常） | **45/45** |
+| `qa.js` | 主回归（加载/检索/自定义点/出题失败处理/公式必须被排版/无异常） | **46/46** |
 | `tpl_probe.js` | 观澜模板库 + 场景校验 | **45/45**（⚠️ 必须指向 `guanlan.html`，指向 `index.html` 会 boot timeout） |
 | `eng_probe.js` | 英语重负载库（3053 点/10 板块/点选成本 < 250ms） | **20/20** |
 | `desk_fp_probe.js` | 开屏版权实际绘制 + 运行期指纹 | **3/3** |
@@ -255,6 +255,8 @@ Build ID **`QG-20260920-5e5d5a`**，位于：
 10. **别对正在被别的 agent 改的文件动手**；也别删别人的 `_backup_*` / `_cc_*` / 探针临时目录。
 11. **MathJax 的 `autoload` 必须显式关掉**（三个页面的 `window.MathJax.tex` 里都有 `autoload: false`）。默认开启时，正文里出现**任何未内置的宏**（`\boldsymbol`、`\cancel`、`\bbox`、`\unicode`、`\textcolor` …）都会让 MathJax **懒加载** `input/tex/extensions/<名字>.js`；而本应用只内嵌了单个 `vendor/mathjax-tex-svg.js`，那个请求必然 **404** → `typesetPromise` **整体 reject** → 而调用处的 `.catch(function(){})` 会把它**静默吞掉** → 结果是**整张卡片的公式全部保持 `$...$` 不排版**（实测事故：2026 真题里的 `\boldsymbol{a}`，日志留下 `404:web.vendor.input.tex.extensions.boldsymbol.js`）。
     现在的兜底有三层：关 `autoload` + 给 8 个常见扩展宏做等价替身（`\boldsymbol`/`\bm` → `\mathbf` 等）+ 提示词禁用这些宏。**改动 MathJax 配置或渲染调用处后，必须跑断言：页面里渲染过的公式要出现 `mjx-container`、且文本里不再含 `$`**（`_qa/qa.js` 里有这条）。同类"静默失败"的排查思路：**先看 `%LOCALAPPDATA%\穷观学习\knet_run.log` 有没有 `404:` / `ERROR` 行，再看被 `.catch` 吞掉的 Promise**。
+    **两个实测出来的细节（别再踩）**：① 断言要写在 **`MathJax.config.tex.autoload`** —— 本构建（MathJax 3.2.2 的 `tex-svg` 单文件版）里**没有** `window.MathJax.tex` 这一层（`MathJax.startup.input[0].options.autoload` 读数也不可靠，实测 `undefined`）；② **`autoload: true` 不是"恢复旧行为"** —— MathJax 期望它是一个**映射对象**，写 `true` 时 `Object.keys(true) === []`，等于**也把 autoload 关掉了**，做负对照实验时会因此复现不出 bug。
+12. **`Start-Process` 传含中文的参数会乱码**（把 UTF-8 当 GBK：`桌面版` → `妗岄潰鐗`）。起本地服务器/跑探针时用**后台作业通道**或 `node -e` / `cmd /c`，并让脚本自己 `cd`（`node 桌面版\build\_qa\server.js <绝对根目录> <端口>` 的 workdir 必须是项目根）。
 
 ---
 

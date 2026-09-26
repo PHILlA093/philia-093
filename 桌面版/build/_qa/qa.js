@@ -308,6 +308,23 @@ async function main() {
     const solShown = await c.eval('document.querySelector(".qcard .sol").classList.contains("show")');
     check('question cards render + mathjax + toggle', qCards === 1 && mjxCards > 0 && solShown === true, 'cards=' + qCards + ' mjx=' + mjxCards);
 
+    // 9b) 公式必须真的被排版 —— 「LaTeX 不渲染」bug 的永久回归闸门(2026-09-27 修)
+    // 症状(实测):题干里出现 \boldsymbol{a} 时,MathJax 的 autoload 会去懒加载
+    // input/tex/extensions/boldsymbol.js;而桌面宿主只内嵌了单个 vendor/mathjax-tex-svg.js,
+    // 该请求必然 404 → typesetPromise 整体 reject,又被 train.js 的 .catch(function(){}) 吞掉
+    // → 整张卡片的公式全部保持 $...$ 裸露在用户眼前(不是"某一条公式没渲染",是整卡全废)。
+    // 修法:三个页面的 tex.autoload=false + 给 \boldsymbol/\bm/\cancel/… 八个宏做等价替身。
+    // 所以这里刻意用含 \boldsymbol 的题干重放原始触发条件:配置一旦被改回去,这条断言必红。
+    // 注:MathJax 3.2.2 的 tex-svg 单文件构建里 **没有** window.MathJax.tex 这一层(实测 keys 只有
+    // config/loader/startup/typesetPromise/tex2svg/version…),用户配置被合并进 MathJax.config.tex,
+    // 因此权威读数是 MathJax.config.tex.autoload;MathJax.tex 若将来存在,也一并要求为 false。
+    await c.eval('(function(){var BS=String.fromCharCode(92); window.__trainTest.renderQuestions([{type:"解答", difficulty:2, stem:"已知向量 $"+BS+"boldsymbol{a}=(1,-2)$,求 $|"+BS+"boldsymbol{a}|$", options:null, answer:"$"+BS+"sqrt{5}$", analysis:"由模长公式 $|"+BS+"boldsymbol{a}|="+BS+"sqrt{5}$;$"+BS+"cancel{AB}$ 表示消去", source:"AI \u751f\u6210"}]); return "ok";})()');
+    // 等排版真正落到 DOM:修好了通常几十毫秒;真坏了这里必然超时,下面的断言就会红(而不是随机假红)
+    await waitFor(() => c.eval('document.querySelectorAll("#qaArea .qcard mjx-container").length > 0'), 8000).then(() => true).catch(() => false);
+    const tex = await c.eval('(function(){var M=window.MathJax;var card=document.querySelector("#qaArea .qcard");var t=card?card.textContent:"";var a=(M&&M.config&&M.config.tex)?M.config.tex.autoload:undefined;var b=(M&&M.tex)?M.tex.autoload:undefined;return {mjxAll:document.querySelectorAll("mjx-container").length,cardMjx:card?card.querySelectorAll("mjx-container").length:-1,cardHasDollar:t.indexOf("$")>=0,cfgAutoload:(a===undefined?null:a),texLayerAutoload:(b===undefined?null:b),autoloadOff:(a===false)&&(b===undefined||b===false),text:String(t).slice(0,90)};})()');
+    check('formulas typeset, no raw $ latex (autoload off)', !!tex && tex.mjxAll > 0 && tex.cardMjx > 0 && tex.cardHasDollar === false && tex.autoloadOff === true,
+      tex ? ('mjxAll=' + tex.mjxAll + ' cardMjx=' + tex.cardMjx + ' cardHasDollar=' + tex.cardHasDollar + ' autoload(cfg/tex)=' + tex.cfgAutoload + '/' + tex.texLayerAutoload + ' text=' + JSON.stringify(tex.text)) : 'eval returned undefined');
+
     // 10) console exceptions
     await sleep(400);
     const bad = errors.filter(e => !/404|Failed to load resource|favicon|net::|ERR_/.test(e));
