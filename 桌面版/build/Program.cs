@@ -1310,12 +1310,23 @@ namespace KnowledgeNetApp
         private static readonly Regex BlockYearRe =
             new Regex(@"(?:19|20)\d{2}(?=\s*年)", RegexOptions.Compiled);
 
+        // 块首 ###SRC: 那一行(年份只看这一行:正文里出现的年份不算来源年份)
+        private static string BlockHead(string block)
+        {
+            if (block == null) return "";
+            int nl = block.IndexOf('\n');
+            return nl > 0 ? block.Substring(0, nl) : block;
+        }
+
         // 取块首 ###SRC: 行里的四位数年份;无则 0
         private static int BlockYear(string block)
         {
-            if (block == null) return 0;
-            int nl = block.IndexOf('\n');
-            string head = nl > 0 ? block.Substring(0, nl) : block;
+            return BlockYearOfHead(BlockHead(block));
+        }
+
+        private static int BlockYearOfHead(string head)
+        {
+            if (head == null || head.Length == 0) return 0;
             Match m = BlockYearRe.Match(head);
             if (!m.Success) return 0;
             int y;
@@ -1333,6 +1344,104 @@ namespace KnowledgeNetApp
             if (block == null) return WNormal;
             if (!block.StartsWith("###SRC:zt/", StringComparison.Ordinal)) return WNormal;
             return IsRecent(BlockYear(block)) ? WRecent : WNormal;
+        }
+
+        /* ---------- 年份意图识别(查询 → 年份 + 意图) ----------
+         * 用户在破卷搜索框里输入「2026高考题」这类查询时:
+         *   1) 年份 = 查询里第一个 1900–2099 的四位数。前后各加一位"非数字"边界,
+         *      避免把 12026 这种编号里的后四位切出来当成年份;
+         *      「第01讲」的 01、「4题」的 4 位数不够/不以 19|20 打头 → 不会命中。
+         *      「2026年」这种写法天然含 2026,直接命中。
+         *   2) 意图 = 命中 高考/真题/试题/考卷/试卷/模拟/联考/月考/质检/一模/二模/押题 之一,
+         *      表示"要真题/试卷素材"(而不是普通知识点讲解)。
+         * 只有年份没有意图词(例如「2026届一轮讲义」)不启用年份限定,保持原有检索行为。
+         */
+        private static readonly Regex QueryYearRe =
+            new Regex(@"(?<!\d)(?:19|20)\d{2}(?!\d)", RegexOptions.Compiled);
+
+        private static readonly Regex IntentRe =
+            new Regex("高考|真题|试题|考卷|试卷|模拟|联考|月考|质检|一模|二模|押题", RegexOptions.Compiled);
+
+        // 查询里的第一个年份;没有(或不在 1900–2099)则 0
+        private static int QueryYear(string q)
+        {
+            if (string.IsNullOrEmpty(q)) return 0;
+            Match m = QueryYearRe.Match(q);
+            if (!m.Success) return 0;
+            int y;
+            return int.TryParse(m.Value, out y) ? y : 0;
+        }
+
+        private static bool HasExamIntent(string q)
+        {
+            return !string.IsNullOrEmpty(q) && IntentRe.IsMatch(q);
+        }
+
+        /* "只要年份"判定:把年份、随后的「年」、试卷类词、空白标点全部去掉后,
+         * 查询里不剩任何实词 → 用户就是想看"那一年的卷子"(2026 / 2026年 / 2026高考题 /
+         * 2026年高考真题 / 2026一模…)。剩下实词(2026 函数单调性)则只是"年份限定"。
+         * 注意:白名单里既有 高考/真题/模拟/一模 这类整词,也有 题/卷 这类通用名词 ——
+         * 「2026高考题」按用户口径就是"只要年份",不该因为多打了一个「题」字就被当成实词。
+         */
+        private static readonly Regex ExamWordRe = new Regex(
+            "高考|真题|模拟|联考|月考|质检|一模|二模|押题|试题|考卷|试卷|原卷|全卷解析|全卷|解析|答案|整卷|套卷|题目|卷子|年|题|卷",
+            RegexOptions.Compiled);
+
+        private static readonly Regex NoiseRe = new Regex(
+            @"(?:19|20)\d{2}|[\s,，、;；.。·:：!！?？""'“”‘’()（）\[\]【】\-—_/\\|]+",
+            RegexOptions.Compiled);
+
+        private static bool QueryYearOnly(string q)
+        {
+            if (string.IsNullOrEmpty(q)) return false;
+            return NoiseRe.Replace(ExamWordRe.Replace(q, " "), "").Length == 0;
+        }
+
+        // 来源路径末段的文件名(「命中了几份不同的试卷」按它去重)
+        private static string PaperName(string head)
+        {
+            if (head == null) return "";
+            int p = head.LastIndexOf('/');
+            string s = p >= 0 ? head.Substring(p + 1) : head;
+            return s.Replace("\r", "").Trim();
+        }
+
+        // "像不像一份卷子"的粗判:只在年份主导模式下用于排序,不改变召回范围
+        private static readonly Regex PaperMarkRe = new Regex(
+            "原卷|真题|全卷解析|解析|全国卷|新高考|上海卷|北京卷|天津卷|浙江卷|模拟|一模|二模",
+            RegexOptions.Compiled);
+
+        private static bool IsPaperHead(string head)
+        {
+            return head != null && head.Length > 0 && PaperMarkRe.IsMatch(head);
+        }
+
+        // 块首 ###SRC: 行里是否含该年份字符串(调用方已把首行切好)。
+        // 比 BlockYear(要求"年"紧跟其后)宽松,所以「2026年上海卷(春)原卷.txt」
+        // 和路径中段带 2026 的资料都能被年份限定筛到(与"头部含该年份"口径一致)。
+        private static bool HeadHasYear(string head, string y)
+        {
+            if (head == null || y == null || y.Length == 0) return false;
+            return head.IndexOf(y, StringComparison.Ordinal) >= 0;
+        }
+
+        // 档案覆盖的年份区间(按块首第一个 1900–2099 四位数统计)。
+        // 用途:如实告诉用户「本机档案里没有 2026 年的题(档案年份 1952-2026)」,
+        // 区间由语料现算,不写死常量(语料换版本后文案不会撒谎)。
+        private static void ArchiveYearRange(string[] pool, out int from, out int to)
+        {
+            int lo = 9999, hi = 0;
+            for (int i = 0; i < pool.Length; i++)
+            {
+                Match m = QueryYearRe.Match(BlockHead(pool[i]));
+                if (!m.Success) continue;
+                int y;
+                if (!int.TryParse(m.Value, out y)) continue;
+                if (y < lo) lo = y;
+                if (y > hi) hi = y;
+            }
+            from = hi > 0 ? lo : 0;
+            to = hi;
         }
 
         private static string HandleMats(Dictionary<string, object> msg)
@@ -1354,21 +1463,109 @@ namespace KnowledgeNetApp
                 lock (CorpusLock) { pool = mergedBlocks != null ? mergedBlocks : new string[0]; }
                 string prefix = srcFilter.Length > 0 ? "###SRC:" + srcFilter + "/" : "";
                 int needScore = loose ? 1 : 2;                 // loose:放宽到命中 1 词
+                // ---------- 年份意图(「2026」「2026高考题」「2026 函数单调性」)----------
+                // 分两档(与 js/train.js 的 parseSearchIntent 同一套语义):
+                //   yearOnly  查询里除年份/「年」/试卷类词外没有别的实词 → 年份主导:
+                //             不按知识点过滤(用户要的是"那一年的卷子"),试卷优先排序;
+                //   yearScope 年份 + 实词 → 年份先当范围,再用实词在该年份内缩小。
+                // 两档都先按"头部含该年份"收候选,再用"自身年份 == 该年份"精筛:
+                // zt/版本2：数学（按省份分类）2008-2026/…/2017年高考数学试卷.txt 这种
+                // "合集目录名里带年份"的块自身年份是 2017,绝不能当 2026 的素材。
+                int declYear = msg.ContainsKey("year") ? SafeInt(msg["year"], 0) : 0;
+                int qYear = declYear > 0 ? declYear : QueryYear(q);
+                bool qIntent = HasExamIntent(q);
+                bool qYearOnly = QueryYearOnly(q);              // 去掉年份/年/试卷类词后不剩实词
+                if (msg.ContainsKey("yearOnly") && Convert.ToBoolean(msg["yearOnly"])) qYearOnly = true;
+                // 页面明确给了年份,或"只要年份",或查询里带 高考/真题 这类意图词 → 启用年份检索
+                bool yearMode = qYear > 0 && (declYear > 0 || qYearOnly || qIntent);
+                if (!yearMode) qYearOnly = false;
+                string yearTag = yearMode ? qYear.ToString() : "";
+                // 年份已经由 yearMode 单独把关,再把裸年份当成关键词只会把"限定"冲淡
+                // (loose 下命中 1 词即算命中,而"2026"几乎出现在所有该年份块的头部)。
+                if (yearMode)
+                    terms.RemoveAll(delegate(string t) { return t == yearTag || t == yearTag + "年"; });
+                int yearCand = 0;                              // 头部含该年份的候选块数
+                int yearStrict = 0;                            // 上述候选中"自身年份 == 该年份"的块数(真原卷)
+                int yearOther = 0;                             // 头部含该年份、但自身是别的年份的块数
+                int yearMatched = 0;                           // 实际进入排序的块数(限定档=关键词命中的真原卷)
+                bool yearFallback = false;
+                var paperNames = new HashSet<string>();        // 该年份命中了几份不同的试卷(按来源文件名去重)
+                // 年份限定档的召回放宽:中文没有词边界,「函数单调性」这种连写实词当成一个
+                // 子串去匹配几乎必然 0 命中。候选此刻已被锁死在"目标年份的真原卷"里,串不了年份,
+                // 所以把长中文词再拆成 2 字片段一起匹配(命中片段越多排越前)。
+                // 只对中文词生效:英文按 2 字母切会命中一大片无意义的块。
+                if (yearMode && !qYearOnly)
+                {
+                    var extraTerms = new List<string>();
+                    for (int ti = 0; ti < terms.Count; ti++)
+                    {
+                        string tw = terms[ti];
+                        if (tw.Length < 4) continue;
+                        int cjk = 0;
+                        for (int ci = 0; ci < tw.Length; ci++)
+                            if (tw[ci] >= '\u4e00' && tw[ci] <= '\u9fff') cjk++;
+                        if (cjk * 2 < tw.Length) continue;
+                        for (int ci = 0; ci + 2 <= tw.Length; ci++)
+                        {
+                            string s2 = tw.Substring(ci, 2);
+                            if (!terms.Contains(s2) && !extraTerms.Contains(s2)) extraTerms.Add(s2);
+                        }
+                    }
+                    terms.AddRange(extraTerms);
+                }
                 var idxHits = new List<int>();                 // 命中块下标
                 var scores = new Dictionary<int, double>();    // 加权分 = 词命中数 × 年份权重
-                for (int i = 0; i < pool.Length; i++)
+                bool retryAll = false;
+                do
                 {
-                    string b = pool[i];
-                    if (prefix.Length > 0 && !b.StartsWith(prefix, StringComparison.Ordinal)) continue;
-                    int score = 0;
-                    for (int k = 0; k < terms.Count; k++)
+                    bool limitYear = yearMode && !retryAll;
+                    bool onlyNow = qYearOnly && limitYear;     // 年份主导:本轮不按关键词过滤
+                    idxHits.Clear();
+                    scores.Clear();
+                    if (limitYear) { yearCand = 0; yearStrict = 0; yearOther = 0; yearMatched = 0; paperNames.Clear(); }
+                    for (int i = 0; i < pool.Length; i++)
                     {
-                        if (b.IndexOf(terms[k], StringComparison.Ordinal) >= 0) score++;
-                        if (score >= 3) break;
+                        string b = pool[i];
+                        if (prefix.Length > 0 && !b.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                        string head = limitYear ? BlockHead(b) : null;
+                        if (limitYear && !HeadHasYear(head, yearTag)) continue;
+                        bool inYear = limitYear && BlockYearOfHead(head) == qYear;
+                        if (limitYear)
+                        {
+                            yearCand++;
+                            if (inYear) { yearStrict++; paperNames.Add(PaperName(head)); }
+                            else yearOther++;
+                        }
+                        if (onlyNow)
+                        {
+                            // 年份主导:不要求与任何知识点/关键词匹配 —— 「2026」要的是那一年的卷子。
+                            // 排序:路径带 原卷/真题/全卷解析/…卷 的排前面,其余按原有权重。
+                            if (!inYear) continue;
+                            idxHits.Add(i);
+                            scores[i] = (IsPaperHead(head) ? 100000.0 : 0.0) + BlockWeight(b);
+                            yearMatched++;
+                            continue;
+                        }
+                        int score = 0;
+                        for (int k = 0; k < terms.Count; k++)
+                        {
+                            if (b.IndexOf(terms[k], StringComparison.Ordinal) >= 0) score++;
+                            if (score >= 3) break;
+                        }
+                        // 阈值仍按原始词命中数判定(权重只影响排序,不改变召回门槛)
+                        if (score < needScore) continue;
+                        // 年份限定下只认真原卷:合集目录里的其他年份卷子绝不能当该年份素材,
+                        // 否则状态栏说"2026 年命中 12 段"、模型拿到的却是 2017 年的题。
+                        if (limitYear && !inYear) continue;
+                        idxHits.Add(i);
+                        scores[i] = score * BlockWeight(b);
+                        if (limitYear) yearMatched++;
                     }
-                    // 阈值仍按原始词命中数判定(权重只影响排序,不改变召回门槛)
-                    if (score >= needScore) { idxHits.Add(i); scores[i] = score * BlockWeight(b); }
-                }
+                    // 该年份一段真原卷都没有 → 退回普通检索(结果里仍如实标注该年份 0 段)
+                    if (!(yearMode && !retryAll && yearStrict == 0)) break;
+                    retryAll = true;
+                    yearFallback = true;
+                } while (true);
                 idxHits.Sort(delegate(int a, int b2)
                 {
                     int c = scores[b2].CompareTo(scores[a]);
@@ -1416,11 +1613,28 @@ namespace KnowledgeNetApp
                     outHits.Add(h);
                     totalChars += sb.Length;
                 }
+                int yFrom = 0, yTo = 0;
+                if (yearMode) ArchiveYearRange(pool, out yFrom, out yTo);
+                // 日志尾部固定带 year=/intent=/filtered= —— 下次排查一眼就能看出年份意图有没有生效。
+                // filtered = 头部含该年份的候选数(规格口径);strict = 其中自身年份就是该年份的真原卷数;
+                // matched  = 实际进入排序的段数(限定档=真原卷里关键词命中的);only=1 表示年份主导
+                // (不按知识点过滤);papers = 该年份命中了几份不同试卷;fallback=1 表示该年份真原卷 0 段。
+                string yearLog = " year=" + qYear + " intent=" + (qIntent ? "真题" : "-") +
+                    " filtered=" + yearCand;
+                if (yearMode)
+                    yearLog += " only=" + (qYearOnly ? 1 : 0) + " strict=" + yearStrict +
+                        " otherYears=" + yearOther + " matched=" + yearMatched +
+                        " papers=" + paperNames.Count + " fallback=" + (yearFallback ? 1 : 0) +
+                        " yrange=" + yFrom + "-" + yTo;
                 Log("MATS:query=" + Trunc(q, 40) + " src=" + (srcFilter.Length > 0 ? srcFilter : "*") +
                     " loose=" + loose + " hits=" + outHits.Count + " recent=" + nOutRecent +
-                    "/" + RecentFrom + "-" + RecentTo + " scanned=" + pool.Length);
+                    "/" + RecentFrom + "-" + RecentTo + " scanned=" + pool.Length + yearLog);
                 return Json(new { kind = "matsResp", ok = true, hits = outHits.ToArray(),
-                    total = pool.Length, where = baseWhere });
+                    total = pool.Length, where = baseWhere,
+                    year = qYear, intent = qIntent, yearMode = yearMode, yearOnly = qYearOnly,
+                    filtered = yearCand, strict = yearStrict, otherYears = yearOther,
+                    matched = yearMatched, papers = paperNames.Count, fallback = yearFallback,
+                    yearFrom = yFrom, yearTo = yTo });
             }
             catch (Exception ex)
             {
